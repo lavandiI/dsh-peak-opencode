@@ -1,3 +1,7 @@
+// The assertions below use Minsk local time; keep the suite independent of the
+// machine timezone (CI runs in UTC and sets the same variable in the job env).
+process.env.TZ = "Europe/Minsk";
+
 // Smoke test for dsh-peak-opencode client.js without a browser.
 // Renders the registered components with a minimal React hook shim and
 // checks the Russian labels and phase logic.

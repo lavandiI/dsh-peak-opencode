@@ -12,6 +12,8 @@ jobs:
   test:
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Minsk
     strategy:
       fail-fast: false
       matrix:
