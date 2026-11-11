@@ -1,0 +1,7 @@
+# dsh-peak-opencode: полоса «OpenCode Go cost/peak» над полем ввода.
+# Браузерная половина подхватывается из package.json → dsh.client
+# (/plugins/dsh-peak-opencode/client.js), в патче нужна только запись плагина.
+
+- insert:
+    - id: peak-opencode
+      name: 'dsh-peak-opencode'

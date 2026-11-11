@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "OpenCode Go cost/peak",
+    "detail": "detail/es.md",
+    "description": "Una banda sobre el campo de entrada muestra la tarifa del modelo actual: pico, valle, única o gratuita, precios por 1M tokens (entrada, salida, caché) y el tiempo hasta el cambio de tarifa. El catálogo de OpenCode Go se carga al iniciar DSH."
+  }
+}

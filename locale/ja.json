@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "OpenCode Go cost/peak",
+    "detail": "detail/ja.md",
+    "description": "入力欄の上に現在のモデルの料金（ピーク、オフピーク、一律、無料）と 100 万トークンあたりの価格（入力・出力・キャッシュ）、料金切り替えまでの残り時間を表示します。OpenCode Go カタログは DSH 起動時に取得されます。"
+  }
+}

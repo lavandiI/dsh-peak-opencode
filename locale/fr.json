@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "OpenCode Go cost/peak",
+    "detail": "detail/fr.md",
+    "description": "Une bande au-dessus du champ de saisie affiche le tarif du modèle actuel : pointe, creux, unique ou gratuit, les prix par 1M de tokens (entrée, sortie, cache) et le temps avant le changement de tarif. Le catalogue OpenCode Go est chargé au démarrage de DSH."
+  }
+}

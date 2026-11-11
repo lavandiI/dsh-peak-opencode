@@ -1,0 +1,71 @@
+{
+  "name": "dsh-peak-opencode",
+  "version": "0.4.4",
+  "description": "OpenCode Go cost/peak: полоса над полем ввода показывает тариф текущей модели — пиковый, льготный, единый или бесплатный — цены за 1M токенов (вход, выход, кэш) и время до смены тарифа. Каталог OpenCode Go подтягивается при запуске DSH.",
+  "icon": "./assets/icon.svg",
+  "license": "MIT",
+  "author": "lavandil",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lavandiI/dsh-peak-opencode.git"
+  },
+  "homepage": "https://github.com/lavandiI/dsh-peak-opencode#readme",
+  "bugs": {
+    "url": "https://github.com/lavandiI/dsh-peak-opencode/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./assets/icon.svg"
+  },
+  "files": [
+    "lib/**/*.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README-ru.md",
+    "PUBLISHING.md",
+    "CHANGELOG.md",
+    "locale/*.json",
+    "detail/*.md",
+    "assets/icon.svg",
+    "assets/preview.png",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --check lib/index.js && node --check lib/client.js && node test/render.cjs && node test/host.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "opencode",
+    "opencode-go",
+    "peak",
+    "off-peak",
+    "pricing",
+    "composer",
+    "i18n",
+    "localization",
+    "russian"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
+}

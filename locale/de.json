@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "OpenCode Go cost/peak",
+    "detail": "detail/de.md",
+    "description": "Ein Band über dem Eingabefeld zeigt den Tarif des aktuellen Modells: Spitze, Nebenzeit, einheitlich oder kostenlos, Preise pro 1M Tokens (Eingabe, Ausgabe, Cache) und die Restzeit bis zum Tarifwechsel. Der OpenCode-Go-Katalog wird beim DSH-Start geladen."
+  }
+}

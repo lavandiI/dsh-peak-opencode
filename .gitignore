@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Local scratch: screenshots, temporary exports and diagnostic files
+artifacts/
+
+# Local development helpers (token prompt, window capture, asar reader)
+scripts/
+
+# Packed packages
+*.tgz
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

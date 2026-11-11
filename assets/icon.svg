@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="OpenCode Go cost/peak">
+  <rect x="36" y="36" width="440" height="440" rx="112" fill="#FFF6EE"/>
+  <circle cx="256" cy="256" r="150" fill="#BFE3CC"/>
+  <path d="M256 106a150 150 0 0 1 0 300z" fill="#F7C6BE"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#3D3A38" stroke-width="14"/>
+  <path d="M256 166v90l66 36" fill="none" stroke="#3D3A38" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="256" cy="256" r="11" fill="#3D3A38"/>
+</svg>

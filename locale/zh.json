@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "OpenCode Go cost/peak",
+    "detail": "detail/zh.md",
+    "description": "输入框上方的费率条显示当前模型的费率：高峰、低谷、统一或免费，每 100 万 token 的价格（输入、输出、缓存）以及距离费率切换的剩余时间。OpenCode Go 目录在 DSH 启动时加载。"
+  }
+}

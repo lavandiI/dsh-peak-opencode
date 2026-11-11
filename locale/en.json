@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "OpenCode Go cost/peak",
+    "detail": "detail/en.md",
+    "description": "A band above the composer shows the current model's tariff — peak, off-peak, flat or free — with prices per 1M tokens (input, output, cache) and the time left until the tariff changes. The OpenCode Go catalog is fetched on DSH startup."
+  }
+}
