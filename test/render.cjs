@@ -15,17 +15,25 @@ const source = fs.readFileSync(file, "utf8");
 // ---------- React shim ----------
 let hookIndex = 0;
 let hookState = [];
+let effectSlots = [];
+let dirty = false;
 const refs = [];
 
 function resetHooks() {
   hookIndex = 0;
   hookState = [];
+  effectSlots = [];
+  dirty = false;
 }
 function useState(initial) {
   const at = hookIndex++;
   if (at >= hookState.length) hookState[at] = typeof initial === "function" ? initial() : initial;
   return [hookState[at], (next) => {
-    hookState[at] = typeof next === "function" ? next(hookState[at]) : next;
+    const value = typeof next === "function" ? next(hookState[at]) : next;
+    // Как в React: присваивание того же значения не вызывает перерисовку.
+    if (Object.is(value, hookState[at])) return;
+    hookState[at] = value;
+    dirty = true;
   }];
 }
 function useReducer(_reducer, initial) {
@@ -36,7 +44,28 @@ function useRef(initial) {
   if (refs[at] === undefined) refs[at] = { current: initial };
   return refs[at];
 }
-function useEffect() {}
+// Эффекты выполняются после рендера и перезапускаются при смене зависимостей —
+// иначе сценарии вроде «сессия сменилась, компонент переподписался» не проверить.
+function useEffect(callback, deps) {
+  const at = hookIndex++;
+  const previous = effectSlots[at];
+  const changed = previous === undefined
+    || previous.deps === undefined
+    || deps === undefined
+    || deps.length !== previous.deps.length
+    || deps.some((value, index) => !Object.is(value, previous.deps[index]));
+  if (!changed) return;
+  if (previous !== undefined && typeof previous.cleanup === "function") previous.cleanup();
+  effectSlots[at] = { deps, cleanup: null, pending: callback };
+}
+function runEffects() {
+  for (const slot of effectSlots) {
+    if (slot === undefined || slot.pending === undefined) continue;
+    const cleanup = slot.pending();
+    slot.cleanup = typeof cleanup === "function" ? cleanup : null;
+    slot.pending = undefined;
+  }
+}
 function useLayoutEffect() {}
 function useSyncExternalStore(_subscribe, getSnapshot) {
   return getSnapshot();
@@ -63,6 +92,18 @@ const styleTags = [];
 const documentShim = {
   documentElement: { style: { setProperty() {} }, lang: "ru" },
   head: { appendChild(tag) { styleTags.push(tag); } },
+  visibilityState: "visible",
+  listeners: new Map(),
+  addEventListener(name, handler) {
+    if (!this.listeners.has(name)) this.listeners.set(name, []);
+    this.listeners.get(name).push(handler);
+  },
+  removeEventListener(name, handler) {
+    const list = this.listeners.get(name);
+    if (list === undefined) return;
+    const at = list.indexOf(handler);
+    if (at >= 0) list.splice(at, 1);
+  },
   createElement() {
     const tag = { dataset: {}, textContent: "", style: {} };
     createdTags.push(tag);
@@ -105,13 +146,49 @@ const exported = definition.factory((name) => {
 
 // ---------- host shim ----------
 const current = { provider: "opencode-go", model: "deepseek-v4.1-flash" };
-const store = {
-  getSnapshot() { return { current }; },
+// Вторая сессия со своим стором и своей моделью: проверяет, что полоса
+// переподписывается на новую сессию, а не остаётся на прежней.
+const second = { provider: "opencode-go", model: "glm-5.3" };
+// Отображаемые имена: DSH отдаёт их в каталоге моделей сессии (в ModelSelection
+// поля name нет), поэтому стор сессии отдаёт groups.
+const MODEL_NAMES = {
+  "deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
+  "glm-5.3": "GLM-5.3",
+  "beam-free": "Beam Free",
+  "longcat-2.5-preview-free": "LongCat 2.5 Preview Free",
+  "step-5-preview-free": "Step 5 Preview Free",
+  "unknown-go-model": "Some Go Model"
+};
+function makeStore(getSelection) {
+  return {
+    getSnapshot() {
+      const selection = getSelection();
+      const name = MODEL_NAMES[selection.model];
+      return {
+        current: selection,
+        groups: name === undefined ? [] : [{ id: selection.provider, name: selection.provider, models: [{ id: selection.model, name }] }]
+      };
+    },
+    subscribe() { return () => {}; },
+    load() {}
+  };
+}
+const store = makeStore(() => current);
+const secondStore = makeStore(() => second);
+// Сессия, у которой каталог моделей ещё не загружен: загрузку должен просить
+// эффект, а не рендер (в StrictMode рендер выполняется дважды).
+let emptyLoads = 0;
+const emptyStore = {
+  getSnapshot() { return { current: null, groups: [] }; },
   subscribe() { return () => {}; },
-  load() {}
+  load() { emptyLoads += 1; }
 };
 const directories = {
-  directoryFor() { return { store, load() {} }; }
+  directoryFor(sessionId) {
+    if (sessionId === "session-2") return { store: secondStore, load() {} };
+    if (sessionId === "session-empty") return { store: emptyStore, load: emptyStore.load };
+    return { store, load() {} };
+  }
 };
 const registrations = [];
 const localeListeners = new Set();
@@ -130,23 +207,69 @@ const ctx = {
     if (name === "locale") return localeService;
     return undefined;
   },
+  effect(factory) {
+    const cleanup = factory();
+    return typeof cleanup === "function" ? cleanup : undefined;
+  },
   slots: {
     inject(_name, callback) { callback(); return () => {}; },
     register(slot, component) { registrations.push({ slot, component }); return () => {}; }
   }
 };
 
+// Новый инстанс модуля: свои стор каталога и настройки, свой fetch — так
+// проверяются неуспешные сценарии, которые нельзя показать на живом сторе.
+async function bootInstance(fetchImpl) {
+  const previous = global.fetch;
+  global.fetch = fetchImpl;
+  const instanceRegistrations = [];
+  const instanceCtx = {
+    get: ctx.get,
+    effect: ctx.effect,
+    slots: {
+      inject(_name, callback) { callback(); return () => {}; },
+      register(slot, component) { instanceRegistrations.push({ slot, component }); return () => {}; }
+    }
+  };
+  try {
+    const instance = definition.factory((name) => {
+      if (name === "react") return react;
+      throw new Error("unexpected require: " + name);
+    });
+    instance.apply(instanceCtx);
+    // Даём каталогу отработать fetch → json → setState.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    global.fetch = previous;
+  }
+  return instanceRegistrations;
+}
+
 // ---------- render helpers ----------
+// Рендер с доводкой: React перерисовывает компонент после setState, и только
+// так видны последствия эффектов (например, переподписка на новую сессию).
+function settle(component, props) {
+  let tree = null;
+  for (let round = 0; round < 5; round += 1) {
+    dirty = false;
+    hookIndex = 0;
+    tree = component(props);
+    runEffects();
+    if (!dirty) break;
+  }
+  return tree;
+}
 function render(component, props) {
   resetHooks();
   refs.length = 0;
-  return component(props);
+  return settle(component, props);
 }
 // Повторный рендер с сохранением состояния хуков: нужен для кнопок и
-// подтверждения сброса, которые живут в useState.
+// подтверждения сброса, которые живут в useState, и для перезапуска эффектов
+// при смене пропсов (например, sessionId).
 function renderKept(component, props) {
-  hookIndex = 0;
-  return component(props);
+  return settle(component, props);
 }
 function text(node, out = []) {
   if (node === null || node === undefined || typeof node === "boolean") return out;
@@ -225,6 +348,58 @@ const fakeCatalog = {
       cost: { text: { input: { price: 3, cache: { read: 0.3, write: { "30m": 3 } } }, output: { price: 15 } } }
     },
     {
+      // Цена чтения из кеша ниже $0.003: округление до трёх знаков давало $0.003,
+      // поэтому полоса обязана показывать четыре знака.
+      id: "mimo-v2.6-flash",
+      name: "MiMo v2.6 Flash",
+      limit: { context: 262144, output: 32768 },
+      cost: { text: { input: { price: 0.15, cache: { read: 0.0028 } }, output: { price: 0.6 } } }
+    },
+    {
+      // Совсем мелкая цена: «<$0.0001» честнее, чем «$0.00» у платной модели.
+      id: "nano-price",
+      name: "Nano Price",
+      limit: { context: 131072, output: 16384 },
+      cost: { text: { input: { price: 0.00004 } } }
+    },
+    {
+      // Окно каталога переходит полночь UTC: по Пекину это следующий день.
+      // Понедельник 22:00 UTC — это вторник 06:00 по Пекину, а не понедельник.
+      id: "midnight-window",
+      name: "Midnight Window",
+      limit: { context: 131072, output: 32768 },
+      cost: {
+        text: { input: { price: 1 }, output: { price: 2 } },
+        multipliers: [{
+          when: {
+            utc_days: { in: ["mon"] },
+            any: [{ all: [{ utc_hours: { gte: "22:00" } }, { utc_hours: { lt: "02:00" } }] }]
+          },
+          factor: 2
+        }]
+      }
+    },
+    {
+      // Часовые окна и множитель по дате одновременно: до даты действует только
+      // окно, после даты множители перемножаются.
+      id: "dual-multiplier",
+      name: "Dual Multiplier",
+      limit: { context: 131072, output: 32768 },
+      cost: {
+        text: { input: { price: 1 }, output: { price: 2 } },
+        multipliers: [
+          { when: { date: { gte: "2026-12-01" } }, factor: 3 },
+          {
+            when: {
+              utc_days: { in: ["mon", "tue", "wed", "thu", "fri"] },
+              any: [{ all: [{ utc_hours: { gte: "01:00" } }, { utc_hours: { lt: "04:00" } }] }]
+            },
+            factor: 2
+          }
+        ]
+      }
+    },
+    {
       // Множитель по дате, а не по часам: до 01.12.2026 льготная цена, дальше ×2.
       id: "gemini-4-argon",
       name: "Gemini 4 Argon",
@@ -270,6 +445,8 @@ const settings = registrations.find((entry) => entry.slot.name === "plugins.bund
 assert(dock !== undefined && settings !== undefined, "both slots are present");
 assert(settings.slot.key === "dsh-peak-opencode", "bundle config is keyed by the package name");
 assert(settings.slot.id === undefined && settings.slot.label === undefined, "bundle config needs neither id nor label");
+// Каталог обновляется и в открытой вкладке: таймер + возвращение на страницу.
+assert((documentShim.listeners.get("visibilitychange") ?? []).length === 1, "apply subscribes to visibilitychange for the catalog refresh");
 
 const themeTag = createdTags.find((tag) => tag.dataset.pcTheme !== undefined);
 const customTag = createdTags.find((tag) => tag.dataset.pcCustom !== undefined);
@@ -286,7 +463,7 @@ try {
   assert(valleyText.includes("Льготный тариф"), "valley label rendered: " + valleyText);
   assert(valleyText.includes("до ср 04:00"), "local end time rendered: " + valleyText);
   assert(valleyText.includes("5 ч 30 мин"), "remaining duration rendered: " + valleyText);
-  assert(valleyText.includes("вход $0.15 · выход $0.60 · кэш $0.003 / 1M"), "valley price rendered: " + valleyText);
+  assert(valleyText.includes("вход $0.15 · выход $0.60 · кэш $0.003 за 1M"), "valley price rendered: " + valleyText);
 
   // Peak: Wednesday 2026-11-10 09:00 Beijing.
   Date.now = () => Date.parse("2026-11-10T04:00:00+03:00");
@@ -295,7 +472,7 @@ try {
   assert(peak.props["data-phase"] === "peak", "peak phase detected");
   assert(peakText.includes("Пиковый тариф"), "peak label rendered: " + peakText);
   assert(peakText.includes("до 07:00"), "peak end in local time: " + peakText);
-  assert(peakText.includes("вход $0.30 · выход $1.20 · кэш $0.006 / 1M"), "peak price rendered: " + peakText);
+  assert(peakText.includes("вход $0.30 · выход $1.20 · кэш $0.006 за 1M"), "peak price rendered: " + peakText);
 
   // DeepSeek account (deepseek-flash = V4.1 Flash 1017) uses the built-in prices.
   current.provider = "deepseek-account";
@@ -304,7 +481,7 @@ try {
   const account = render(dock.component, { ctx, sessionId: "session-1" });
   const accountText = text(account).join(" ");
   assert(account.props["data-phase"] === "valley", "deepseek-account phase detected");
-  assert(accountText.includes("вход $0.15 · выход $0.60 · кэш $0.003 / 1M"), "deepseek-account fallback price rendered: " + accountText);
+  assert(accountText.includes("вход $0.15 · выход $0.60 · кэш $0.003 за 1M"), "deepseek-account fallback price rendered: " + accountText);
 
   // A Chinese public holiday is valley even on a weekday.
   Date.now = () => Date.parse("2026-10-01T05:00:00+03:00");
@@ -319,7 +496,7 @@ try {
   const flatText = text(flat).join(" ");
   assert(flat.props["data-phase"] === "flat", "flat phase for a model without peak hours");
   assert(flatText.includes("Единый тариф"), "flat label rendered: " + flatText);
-  assert(flatText.includes("вход $1.40 · выход $4.40 · кэш $0.26 / 1M"), "flat price rendered: " + flatText);
+  assert(flatText.includes("вход $1.40 · выход $4.40 · кэш $0.26 за 1M"), "flat price rendered: " + flatText);
 
   // Cache write (Kimi K3) is rendered as «зап.».
   current.provider = "opencode-go";
@@ -327,7 +504,20 @@ try {
   const kimi = render(dock.component, { ctx, sessionId: "session-1" });
   const kimiText = text(kimi).join(" ");
   assert(kimi.props["data-phase"] === "flat", "Kimi K3 uses the flat band");
-  assert(kimiText.includes("вход $3.00 · выход $15.00 · кэш $0.30 · зап. $3.00 / 1M"), "cache write price rendered: " + kimiText);
+  assert(kimiText.includes("вход $3.00 · выход $15.00 · кэш $0.30 · зап. $3.00 за 1M"), "cache write price rendered: " + kimiText);
+
+  // Дробная цена кеша: 0.0028 не должна превращаться в 0.003.
+  current.provider = "opencode-go";
+  current.model = "mimo-v2.6-flash";
+  const fine = render(dock.component, { ctx, sessionId: "session-1" });
+  const fineText = text(fine).join(" ");
+  assert(fineText.includes("кэш $0.0028"), "sub-cent prices keep four decimals: " + fineText);
+
+  // Цена ниже порога отображения: «<$0.0001», а не «$0.00».
+  current.model = "nano-price";
+  const nano = render(dock.component, { ctx, sessionId: "session-1" });
+  const nanoText = text(nano).join(" ");
+  assert(nanoText.includes("вход <$0.0001"), "prices below the threshold read as <$0.0001: " + nanoText);
 
   // A model with a date multiplier is not flat: it is valley until the date.
   // Каталог при этом обязан прийти из публичного эндпоинта, а не из старого хоста.
@@ -339,7 +529,7 @@ try {
   assert(datedBefore.props["data-phase"] === "valley", "dated model is valley before the multiplier date: " + datedBeforeText);
   assert(datedBeforeText.includes("Льготный тариф"), "dated model shows the valley label: " + datedBeforeText);
   assert(datedBeforeText.includes("до 1 дек."), "dated model shows the multiplier date: " + datedBeforeText);
-  assert(datedBeforeText.includes("вход $2.00 · выход $10.00 · кэш $0.10 / 1M"), "dated model shows the base price: " + datedBeforeText);
+  assert(datedBeforeText.includes("вход $2.00 · выход $10.00 · кэш $0.10 за 1M"), "dated model shows the base price: " + datedBeforeText);
 
   // On and after the date the multiplier applies: peak band and ×2 prices.
   Date.now = () => Date.parse("2026-12-02T12:00:00+03:00");
@@ -347,7 +537,40 @@ try {
   const datedAfterText = text(datedAfter).join(" ");
   assert(datedAfter.props["data-phase"] === "peak", "dated model is peak after the multiplier date: " + datedAfterText);
   assert(datedAfterText.includes("Пиковый тариф"), "dated model shows the peak label: " + datedAfterText);
-  assert(datedAfterText.includes("вход $4.00 · выход $20.00 · кэш $0.20 / 1M"), "dated model applies ×2: " + datedAfterText);
+  assert(datedAfterText.includes("вход $4.00 · выход $20.00 · кэш $0.20 за 1M"), "dated model applies ×2: " + datedAfterText);
+
+  // Окна и дата одновременно: в пик перемножаются, в льготные часы остаётся
+  // только множитель по дате (он поднимает весь прайс).
+  current.provider = "opencode-go";
+  current.model = "dual-multiplier";
+  Date.now = () => Date.parse("2026-11-11T01:00:00Z");
+  const dualBefore = render(dock.component, { ctx, sessionId: "session-1" });
+  const dualBeforeText = text(dualBefore).join(" ");
+  assert(dualBefore.props["data-phase"] === "peak", "the dual-multiplier model peaks inside the window: " + dualBeforeText);
+  assert(dualBeforeText.includes("вход $2.00"), "before the date only the hourly multiplier applies: " + dualBeforeText);
+  Date.now = () => Date.parse("2026-12-02T01:00:00Z");
+  const dualPeak = render(dock.component, { ctx, sessionId: "session-1" });
+  const dualPeakText = text(dualPeak).join(" ");
+  assert(dualPeak.props["data-phase"] === "peak", "the dual-multiplier model still peaks after the date");
+  assert(dualPeakText.includes("вход $6.00"), "hourly and date multipliers multiply at peak: " + dualPeakText);
+  Date.now = () => Date.parse("2026-12-02T12:00:00Z");
+  const dualValley = render(dock.component, { ctx, sessionId: "session-1" });
+  const dualValleyText = text(dualValley).join(" ");
+  assert(dualValley.props["data-phase"] === "valley", "the dual-multiplier model is off-peak outside the window");
+  assert(dualValleyText.includes("вход $3.00"), "the date multiplier still applies off-peak: " + dualValleyText);
+
+  // Окно, переходящее полночь UTC: вместе с окном едет и день недели.
+  current.provider = "opencode-go";
+  current.model = "midnight-window";
+  Date.now = () => Date.parse("2026-11-09T22:30:00Z"); // пн 22:30 UTC = вт 06:30 по Пекину
+  const midnightPeak = render(dock.component, { ctx, sessionId: "session-1" });
+  const midnightPeakText = text(midnightPeak).join(" ");
+  assert(midnightPeak.props["data-phase"] === "peak", "a UTC-midnight window peaks on the next Beijing day: " + midnightPeakText);
+  assert(midnightPeakText.includes("вход $2.00"), "the peak multiplier applies inside the shifted window: " + midnightPeakText);
+  assert(String(midnightPeak.props.title).includes("06:00–10:00"), "the tooltip shows the window in Beijing time: " + midnightPeak.props.title);
+  Date.now = () => Date.parse("2026-11-08T22:30:00Z"); // вс 22:30 UTC = пн 06:30 по Пекину
+  const midnightSunday = render(dock.component, { ctx, sessionId: "session-1" });
+  assert(midnightSunday.props["data-phase"] === "valley", "the day shift does not leak to the previous UTC day: " + text(midnightSunday).join(" "));
 
   // Тот же Argon, но провайдер называет модель с суффиксом варианта доступа —
   // как в DSH: gemini-4-argon-contributor должен попасть в запись каталога.
@@ -357,7 +580,7 @@ try {
   const contrib = render(dock.component, { ctx, sessionId: "session-1" });
   const contribText = text(contrib).join(" ");
   assert(contrib.props["data-phase"] === "valley", "-contributor id resolves to the catalog model: " + contribText);
-  assert(contribText.includes("вход $2.00 · выход $10.00 · кэш $0.10 / 1M"), "-contributor id keeps the base price: " + contribText);
+  assert(contribText.includes("вход $2.00 · выход $10.00 · кэш $0.10 за 1M"), "-contributor id keeps the base price: " + contribText);
 
   // Идентификатор с префиксом провайдера тоже распознаётся.
   current.model = "opencode-go/gemini-4-argon-contributor";
@@ -407,6 +630,22 @@ try {
   assert(freeTwin.props["data-phase"] === "free", "free twin of a paid model uses the free (green) band");
   assert(freeTwinText.includes("бесплатно"), "free twin shows «бесплатно»: " + freeTwinText);
   assert(!freeTwinText.includes("$1.00") && !freeTwinText.includes("$2.70"), "free twin never inherits the paid price: " + freeTwinText);
+
+  // Смена сессии: полоса обязана переподписаться на стор новой сессии, а не
+  // остаться на модели предыдущей (эффект зависит от sessionId).
+  current.provider = "opencode-go";
+  current.model = "deepseek-v4.1-flash";
+  Date.now = () => Date.parse("2026-11-10T22:30:00+03:00");
+  const firstSession = render(dock.component, { ctx, sessionId: "session-1" });
+  const firstSessionText = text(firstSession).join(" ");
+  assert(firstSession.props["data-phase"] === "valley", "the first session shows its own model: " + firstSessionText);
+  assert(firstSessionText.includes("вход $0.15"), "the first session shows its own price: " + firstSessionText);
+  const secondSession = renderKept(dock.component, { ctx, sessionId: "session-2" });
+  const secondSessionText = text(secondSession).join(" ");
+  assert(secondSession.props["data-phase"] === "flat", "switching session re-subscribes to the new store: " + secondSessionText);
+  assert(secondSessionText.includes("Единый тариф"), "the band shows the new session's model: " + secondSessionText);
+  assert(secondSessionText.includes("вход $1.40"), "the band shows the new session's price: " + secondSessionText);
+  assert(!secondSessionText.includes("вход $0.15"), "the previous session's price does not leak: " + secondSessionText);
 
   // A non-DeepSeek model hides the bar.
   current.provider = "openrouter";
@@ -516,6 +755,21 @@ try {
   assert(!/\]\((?!https?:|#)[^)]+\)/.test(mainReadme), "README.md uses absolute links (npm cannot resolve relative ones)");
   assert(fs.existsSync(path.join(__dirname, "..", "README-ru.md")), "Russian README is README-ru.md");
 
+  // Клиентская половина едет в combo-скрипте boot-графа: отдельного
+  // /plugins/<pkg>/client.js у плагина нет (на живом DSH этот путь — 404),
+  // поэтому документация не должна его обещать. Плюс версия в документах
+  // должна совпадать с package.json — иначе получается дрейф, как в 0.4.3.
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  const docs = {
+    "README.md": mainReadme,
+    "README-ru.md": fs.readFileSync(path.join(__dirname, "..", "README-ru.md"), "utf8"),
+    "PUBLISHING.md": fs.readFileSync(path.join(__dirname, "..", "PUBLISHING.md"), "utf8")
+  };
+  for (const [name, body] of Object.entries(docs)) {
+    assert(!body.includes("/plugins/dsh-peak-opencode/client.js"), name + " does not promise a per-plugin client URL");
+    assert(body.includes(packageJson.version), name + " mentions the current version " + packageJson.version);
+  }
+
   // Hero geometry: a lone chip row must not lift the band, a two-chip row must.
   current.provider = "opencode-go";
   current.model = "deepseek-v4.1-flash";
@@ -588,6 +842,134 @@ try {
   const noPrice = render(dock.component, { ctx, sessionId: "session-1" });
   assert(noPrice.props["data-phase"] === "flat", "an unknown Go model is flat");
   assert(noPrice.props["data-hero-price"] === undefined, "no price line when the price label is empty");
+
+  // Имя модели берётся из каталога сессии: в ModelSelection поля name нет,
+  // поэтому без него в подсказке стоял бы id провайдера.
+  assert(String(noPrice.props.title).includes("Some Go Model"), "the model name comes from the session catalog: " + noPrice.props.title);
+
+  // Полоса не должна быть live-регионом: aria-label меняется каждые 10 секунд,
+  // и role="status" заставлял скринридер перечитывать её на каждом тике.
+  assert(noPrice.props.role === "img", "the band is not a live region (role=img)");
+
+  // Незагруженный каталог моделей: загрузку просит эффект, рендер остаётся чистым.
+  const beforeEmpty = emptyLoads;
+  const empty = render(dock.component, { ctx, sessionId: "session-empty" });
+  assert(empty === null, "a session without a loaded model directory hides the band");
+  assert(emptyLoads - beforeEmpty === 1, "the model directory is loaded once per mount, not per render: " + (emptyLoads - beforeEmpty));
+
+  // Часовой пояс не влияет на фазу и цену — меняется только подпись «до …».
+  current.provider = "opencode-go";
+  current.model = "deepseek-v4.1-flash";
+  Date.now = () => Date.parse("2026-11-10T22:30:00+03:00");
+  const originalTz = process.env.TZ;
+  const untilByZone = { UTC: "01:00", "Asia/Shanghai": "09:00", "America/New_York": "20:00" };
+  try {
+    for (const [zone, until] of Object.entries(untilByZone)) {
+      process.env.TZ = zone;
+      const tree = render(dock.component, { ctx, sessionId: "session-1" });
+      const body = text(tree).join(" ");
+      assert(tree.props["data-phase"] === "valley", zone + " keeps the off-peak phase: " + body);
+      assert(body.includes("вход $0.15 · выход $0.60 · кэш $0.003 за 1M"), zone + " keeps the same price: " + body);
+      assert(body.includes("до ") && body.includes(until), zone + " shows the period end in local time: " + body);
+    }
+  } finally {
+    process.env.TZ = originalTz;
+  }
+
+  // Хост вернул пригодный снимок, у которого упало последнее обновление:
+  // клиент обязан принять данные и показать предупреждение, а не пустой каталог.
+  delete localStorageData["dsh-peak-opencode:catalog:v3"];
+  const hostStale = await bootInstance(async () => ({
+    ok: true,
+    json: async () => ({
+      ok: true,
+      stale: true,
+      format: 2,
+      source: "test",
+      updatedAt: Date.parse("2026-11-02T09:00:00Z"),
+      error: "HTTP 500",
+      models: [{ id: "glm-5.3", name: "GLM-5.3", input: 1.4, outputPrice: 4.4, cacheRead: 0.26, peak: null, since: null }]
+    })
+  }));
+  const hostStaleSettings = hostStale.find((entry) => entry.slot.name === "plugins.bundle.config");
+  const hostStaleText = text(render(hostStaleSettings.component, {})).join(" ");
+  assert(hostStaleText.includes("OpenCode Go: 1"), "the host snapshot is accepted even when stale: " + hostStaleText.slice(0, 240));
+  assert(hostStaleText.includes("Каталог не обновился"), "the stale host snapshot is reported: " + hostStaleText.slice(0, 240));
+
+  // Каталог не загрузился: пустой стор, ошибка видна в настройках.
+  delete localStorageData["dsh-peak-opencode:catalog:v3"];
+  const failed = await bootInstance(async () => ({ ok: false, status: 500, json: async () => ({}) }));
+  const failedSettings = failed.find((entry) => entry.slot.name === "plugins.bundle.config");
+  const failedText = text(render(failedSettings.component, {})).join(" ");
+  assert(failedText.includes("Каталог не загрузился"), "a failed catalog load is reported: " + failedText.slice(0, 220));
+  assert(failedText.includes("HTTP 500"), "the catalog error text is shown: " + failedText.slice(0, 220));
+
+  // Хост отдал пригодный снимок, но обновление упало: данные остаются,
+  // а в настройках появляется предупреждение про снимок, а не «не загрузился».
+  localStorageData["dsh-peak-opencode:catalog:v3"] = JSON.stringify({
+    source: "test",
+    updatedAt: Date.parse("2026-11-01T12:00:00Z"),
+    models: [{ id: "glm-5.3", name: "GLM-5.3", input: 1.4, outputPrice: 4.4, cacheRead: 0.26, peak: null, since: null }]
+  });
+  const stale = await bootInstance(async () => ({ ok: false, status: 500, json: async () => ({}) }));
+  const staleSettings = stale.find((entry) => entry.slot.name === "plugins.bundle.config");
+  const staleText = text(render(staleSettings.component, {})).join(" ");
+  assert(staleText.includes("Каталог не обновился"), "a stale snapshot is reported as stale: " + staleText.slice(0, 240));
+  assert(staleText.includes("Показан снимок"), "the stale warning names the snapshot time: " + staleText.slice(0, 240));
+  assert(staleText.includes("OpenCode Go: 1"), "the cached model survives a failed refresh: " + staleText.slice(0, 240));
+  delete localStorageData["dsh-peak-opencode:catalog:v3"];
+
+  // Пустой каталог на обоих маршрутах: это ошибка, а не «нет данных».
+  const emptyCatalog = await bootInstance(async () => ({ ok: true, json: async () => ({ data: [] }) }));
+  const emptySettings = emptyCatalog.find((entry) => entry.slot.name === "plugins.bundle.config");
+  const emptyText = text(render(emptySettings.component, {})).join(" ");
+  assert(emptyText.includes("пустой каталог"), "an empty catalog is reported as an error: " + emptyText.slice(0, 200));
+
+  // Битый JSON в ответе: ошибка разбора доходит до настроек.
+  const brokenJson = await bootInstance(async () => ({
+    ok: true,
+    json: async () => {
+      throw new SyntaxError("Unexpected token < in JSON");
+    }
+  }));
+  const brokenSettings = brokenJson.find((entry) => entry.slot.name === "plugins.bundle.config");
+  const brokenText = text(render(brokenSettings.component, {})).join(" ");
+  assert(brokenText.includes("Каталог не загрузился"), "a broken JSON answer is reported: " + brokenText.slice(0, 200));
+
+  // Битый кеш в localStorage не мешает загрузке: снимок просто игнорируется.
+  localStorageData["dsh-peak-opencode:catalog:v3"] = "not a json";
+  const brokenCache = await bootInstance(async (url) => (String(url).includes("opencode.ai") ? { ok: true, json: async () => fakeCatalog } : { ok: true, json: async () => fakeCatalog }));
+  const brokenCacheSettings = brokenCache.find((entry) => entry.slot.name === "plugins.bundle.config");
+  const brokenCacheText = text(render(brokenCacheSettings.component, {})).join(" ");
+  assert(/OpenCode Go: \d+/.test(brokenCacheText), "a corrupt cache does not block the catalog: " + brokenCacheText.slice(0, 200));
+  delete localStorageData["dsh-peak-opencode:catalog:v3"];
+
+  // Каждый используемый ключ есть во всех восьми словарях: опечатка в t("…")
+  // иначе показывала бы ключ на экране.
+  const dictionaries = {};
+  let localeId = null;
+  for (const line of source.split(/\r?\n/)) {
+    const open = /^\t{3}(en|ru|zh|ja|es|fr|de|pt): \{$/.exec(line);
+    if (open !== null) {
+      localeId = open[1];
+      dictionaries[localeId] = new Set();
+      continue;
+    }
+    if (localeId !== null && /^\t{3}\},?$/.test(line)) {
+      localeId = null;
+      continue;
+    }
+    if (localeId === null) continue;
+    const key = /^\t{4}"([^"]+)":/.exec(line);
+    if (key !== null) dictionaries[localeId].add(key[1]);
+  }
+  assert(Object.keys(dictionaries).length === 8, "all eight dictionaries are found: " + Object.keys(dictionaries).join(", "));
+  const usedKeys = [...new Set([...source.matchAll(/\bt\("([\w.]+)"/g)].map((match) => match[1]))];
+  assert(usedKeys.length > 80, "the key scan sees the dictionary usage: " + usedKeys.length);
+  for (const id of ["en", "ru", "zh", "ja", "es", "fr", "de", "pt"]) {
+    const missing = usedKeys.filter((key) => !dictionaries[id].has(key));
+    assert(missing.length === 0, id + " dictionary covers every used key (missing: " + missing.join(", ") + ")");
+  }
 } finally {
   Date.now = realNow;
 }

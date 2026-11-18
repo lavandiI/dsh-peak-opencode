@@ -27,7 +27,7 @@ Source: the public `https://opencode.ai/inference/go/v1/models` (no API key requ
 
 - On DSH startup the plugin's host half fetches the catalog, caches it for 6 hours and serves it to the browser at `/dsh-peak-opencode/models`. The response is versioned; if an old host is running (after a plugin update without restarting DSH), the client rejects its response and takes the public catalog directly.
 - If the host route is not loaded yet (an old host before the DSH restart), the browser fetches the same endpoint directly — CORS is open.
-- A catalog snapshot is kept in `localStorage`, so a page refresh paints the band immediately without waiting for the network.
+- A catalog snapshot is kept in `localStorage`, so a page refresh paints the band immediately without waiting for the network. While the page stays open the catalog is refreshed in the background: after 6 hours and when the tab becomes visible again. If that refresh fails, the band keeps the last snapshot and the settings show a “snapshot from …” warning.
 - The settings show how many models the catalog has, which ones have peak hours, which have a date-bound multiplier, when the catalog was updated, and a “Refresh catalog” button.
 
 DeepSeek peak hours from the catalog: **Mon–Fri `01:00–04:00` and `06:00–10:00` UTC** (`09:00–12:00` and `14:00–18:00` Beijing time, `04:00–07:00` and `09:00–13:00` Minsk time), multiplier **×2**. Everything else is off-peak. China's 2026 holidays are built in; moved working Saturdays and Sundays are ignored — DeepSeek looks only at weekdays, weekends and holidays.
@@ -37,7 +37,7 @@ Models without multipliers (GLM, Kimi, Qwen, MiniMax, GPT, Claude, Grok and the 
 ## Appearance
 
 - The band is as wide as the composer card and shares its top corners. Its bottom edge tucks under the card, so the band's color shows through the card's cutouts.
-- **On the left is the current tariff's price** per 1M tokens in the order “input · output · cache”: `input $0.30 · output $1.20 · cache $0.006 / 1M` at peak, `input $0.15 · output $0.60 · cache $0.003 / 1M` off-peak, and the base price for the flat tariff. Cache writes, when the model bills them, appear as `write $…` after cache. Free models get the green band with the label `free`: it does not depend on the model's id in the Go catalog. When the provider renames a free model (`longcat-2.5-preview-free` in DSH vs `longcat-2.5-free` in the catalog), the price is still known from the `-free` suffix; and a free model never inherits a paid catalog entry even if the id matches after stripping the suffix (`step-5-preview-free` and `step-5-preview`).
+- **On the left is the current tariff's price** per 1M tokens in the order “input · output · cache”: `input $0.30 · output $1.20 · cache $0.006 per 1M` at peak, `input $0.15 · output $0.60 · cache $0.003 per 1M` off-peak, and the base price for the flat tariff. Cache writes, when the model bills them, appear as `write $…` after cache. Free models get the green band with the label `free`: it does not depend on the model's id in the Go catalog. When the provider renames a free model (`longcat-2.5-preview-free` in DSH vs `longcat-2.5-free` in the catalog), the price is still known from the `-free` suffix; and a free model never inherits a paid catalog entry even if the id matches after stripping the suffix (`step-5-preview-free` and `step-5-preview`).
 - For peak models the fill boundary is the percentage of the **remaining** period; on the right are the phase, the period end in your time zone and the time left: `Off-peak tariff · until 13:00 · 3 hr 49 min`.
 - A flat-tariff model has a solid blue fill and `Flat tariff · no peak hours` on the right. There is no progress or timer because there is no period.
 - A free model has a solid green fill, `Free tariff · no peak hours` on the right and `free` on the left. There is no timer either: the price does not depend on time.
@@ -93,12 +93,12 @@ The plugin is translated into every language DSH officially supports: **English,
 
 ### From npm (for everyone)
 
-Published: [`dsh-peak-opencode@0.4.4`](https://www.npmjs.com/package/dsh-peak-opencode) — the current version in the repository.
+Published: [`dsh-peak-opencode@0.4.5`](https://www.npmjs.com/package/dsh-peak-opencode) — the current version in the repository.
 
 - GUI: **Settings → Plugins → Install** → `dsh-peak-opencode`
 - CLI: `dsh plugin --profile desktop add dsh-peak-opencode`
 
-DSH adds the package to the profile (`dsh.profile.bundles`), applies `cordis.patch.yml` and serves the client half at `/plugins/dsh-peak-opencode/client.js`. After installation, restart DSH (the host half is needed) and refresh the Web GUI page.
+DSH adds the package to the profile (`dsh.profile.bundles`), applies `cordis.patch.yml` and puts the client half into the page's boot graph — it arrives inside one of the bundled `/plugins/...` scripts, so the plugin has no separate client URL. After installation, restart DSH (the host half is needed) and refresh the Web GUI page.
 
 ### Locally (development)
 
@@ -124,6 +124,7 @@ See [PUBLISHING.md](https://github.com/lavandiI/dsh-peak-opencode/blob/main/PUBL
 - The catalog and peak multipliers are public OpenCode Go data; if the provider changes the format, the plugin falls back to the built-in DeepSeek rules and shows a warning in the settings.
 - For other providers (not `opencode-go`) the Go catalog does not apply: DeepSeek is calculated by the built-in rules, and other models get the blue band only with “Show for models outside the Go catalog” enabled.
 - Positioning relies on the `conversation.input.dock` slot and the `data-composer-card` attribute; if the host changes the contract, the band simply stops appearing. Settings register in the `plugins.bundle.config` slot by package name and appear on the plugin page in Plugins; if the slot is renamed, the settings panel disappears while the band keeps working.
+- Settings (peak windows, behaviour, custom CSS) live in the browser's `localStorage`, not in the DSH profile: another browser or machine starts from the defaults. The catalog snapshot lives there too, so it cannot leak anywhere else.
 
 ## Internals
 
@@ -132,7 +133,7 @@ See [PUBLISHING.md](https://github.com/lavandiI/dsh-peak-opencode/blob/main/PUBL
 - Settings live in `localStorage` (`dsh-peak-opencode:settings`); the catalog snapshot is in `dsh-peak-opencode:catalog:v3`.
 - `locale/<language>.json` — title, short description and `meta.detail`; `detail/<language>.md` — the long description DSH shows on the plugin page.
 - Slots: `conversation.input.dock` (`order: 60`) for the band and `plugins.bundle.config` (`key: dsh-peak-opencode`) for the settings panel on the plugin page.
-- No build step: plain ESM/JS. `npm test` checks syntax, renders the band and settings against a React stub (blue and green bands, all languages, “same as DSH” mode) and the host catalog route on the real endpoint format.
+- No build step: plain ESM/JS. `npm test` checks syntax, renders the band and settings against a React stub (blue and green bands, all languages, “same as DSH” mode), the host catalog route on the real endpoint format, host/client multiplier parity (`test/parity.mjs`) and repository hygiene (`test/style.mjs`).
 
 ## Contributing
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-peak-opencode",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "OpenCode Go cost/peak: полоса над полем ввода показывает тариф текущей модели — пиковый, льготный, единый или бесплатный — цены за 1M токенов (вход, выход, кэш) и время до смены тарифа. Каталог OpenCode Go подтягивается при запуске DSH.",
   "icon": "./assets/icon.svg",
   "license": "MIT",
@@ -32,7 +32,6 @@
     "locale/*.json",
     "detail/*.md",
     "assets/icon.svg",
-    "assets/preview.png",
     "LICENSE"
   ],
   "dsh": {
@@ -48,7 +47,7 @@
     }
   },
   "scripts": {
-    "test": "node --check lib/index.js && node --check lib/client.js && node test/render.cjs && node test/host.mjs"
+    "test": "node --check lib/index.js && node --check lib/client.js && node test/style.mjs && node test/render.cjs && node test/host.mjs && node test/parity.mjs"
   },
   "keywords": [
     "dsh",
